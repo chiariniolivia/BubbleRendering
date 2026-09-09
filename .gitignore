@@ -7,3 +7,6 @@ chamber_model/archive/X-03-A03-A - Jar SiPM and reflector full assembly.PLY
 outputs/*
 !outputs/estimated_pose_matrices/
 !outputs/grid_pixel_locations/
+
+.ipynb_checkpoints/
+__pycache__/
