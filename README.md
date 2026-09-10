@@ -28,7 +28,7 @@ So the notebooks can find this environment, register it with Jupyter once (with 
 python -m ipykernel install --user --name sbc --display-name "Python (sbc)"
 ```
 
-Then open a notebook and select the **Python (sbc)** kernel. Every notebook in this repo (root and `archive/`) already has its kernelspec set to `sbc`.
+Then open a notebook and select the **Python (sbc)** kernel. Every notebook in this repo already has its kernelspec set to `sbc`.
 
 ### Running Notebooks
 
@@ -58,16 +58,3 @@ The original code was developed in an Anaconda environment on Windows; `environm
 - [`CorrespondingBubbleDetectionTest.ipynb`](CorrespondingBubbleDetectionTest.ipynb) Features a test for a possible solution to determining corresponding bubble locations between images.
 - [`BulkRendering.ipynb`](BulkRendering.ipynb) Shows how multiple renders of a grid of bubbles can be created using the `bubble_grid_renders` function.
 - [`CameraPoseOptimizationFromRealData.ipynb`](CameraPoseOptimizationFromRealData.ipynb) In-progress work using real background-run camera images (via `real_data_loading.py`) to check/refine the rendering pipeline's camera pose estimates against the physical detector.
-
----
-
-Note: notebooks located in the archive folder are not well documented and feature code that may be deprecated. They were mainly used in initial testing.
-
-- [`archive/PnPEstimationWithCheckerboard.ipynb`](archive/PnPEstimationWithCheckerboard.ipynb) Tries to estimate the pose matrices of the cameras in the chamber by placing a checkerboard in the scene where the fiducial markers would normally be.
-- [`archive/PnP_Test_Render.ipynb`](archive/PnP_Test_Render.ipynb) An earlier version of `archive/PnPEstimationWithCheckerboard.ipynb` that computed the pose for a single camera by placing the checkerboard in the scene where the fiducial markers would be.
-- [`archive/CameraCalibrationWithRenderedCheckerboard.ipynb`](archive/CameraCalibrationWithRenderedCheckerboard.ipynb) Calibrated the camera used to render images by rendering a series of images of a checkerboard. Also features code that could be adapted to calibrate real cameras with real images.
-- [`archive/LocationRemappingTest.ipynb`](archive/LocationRemappingTest.ipynb) Features some of the initial tests for determining the remapping coefficients of distortion functions.
-- [`archive/LocationMappingComparedWithAndWithoutDistortedSurface.ipynb`](archive/LocationMappingComparedWithAndWithoutDistortedSurface.ipynb) Similar to `archive/LocationRemappingTest.ipynb`, performs initial tests for pixel remapping, now comparing the results with and without the distorted jar surfaces.
-- [`archive/TwoCameraTriangulationError.ipynb`](archive/TwoCameraTriangulationError.ipynb) Initial triangulation tests for two-camera midpoint triangulation.
-- [`archive/PoseOptimizationWithRenders.ipynb`](archive/PoseOptimizationWithRenders.ipynb) Attempts to use Mitsuba's inverse rendering to optimize for the pose of the cameras. Based on [this Mitsuba tutorial](https://mitsuba.readthedocs.io/en/latest/src/inverse_rendering/object_pose_estimation.html).
-- [`archive/BasicChamberSurfaceOptimizationRender.ipynb`](archive/BasicChamberSurfaceOptimizationRender.ipynb) Attempts at optimizing a heightmap to determine jar surface distortion. Optimizations were attempted by comparing to a rendered image with a distorted jar surface. Based on [this Mitsuba tutorial](https://mitsuba.readthedocs.io/en/latest/src/inverse_rendering/caustics_optimization.html).
