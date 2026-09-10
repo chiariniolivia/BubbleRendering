@@ -1,12 +1,10 @@
 # Bubble Localization and Rendering for the SBC
 
-Forked from [MA-Khatri/BubbleLocalizationAndRendering](https://github.com/MA-Khatri/BubbleLocalizationAndRendering).
+Forked from [MA-Khatri/BubbleLocalizationAndRendering](https://github.com/MA-Khatri/BubbleLocalizationAndRendering). See that repo for his thesis and some more general documentation.
 
 The primary files are [setup.py](setup.py) which contains functions for setting up and rendering images of the chambers, and [utils.py](utils.py) which contains several functions that are used for triangulation, remapping, creating plots, etc. Examples of how the functions from those files are used to create renders and triangulate bubbles can be found within the Jupyter notebooks.
 
-[real_data_loading.py](real_data_loading.py) loads real background-run data (camera images, handscanned bubble multiplicity, and precomputed `.sbc` analysis outputs) for calibrating the rendered cameras' poses against the physical detector. It expects that data locally under `~/coop/local-runs/<run>/` and `~/coop/local-runs/<run>/analysis/`; that data isn't part of this repo and is treated as read-only.
-
-The associated Blender files used to clean up and export the chamber model can be found [here](https://drive.google.com/drive/folders/1IG_XLitbM6101vEFMDmiwda3bSZK6OpN?usp=drive_link). If you wish to make edits to any of the chamber elements, you can do so in Blender and export the selected components to the `chamber_model/components/` folder. Make sure to make any corresponding necessary changes to the `setup.py` file!
+[real_data_loading.py](real_data_loading.py) loads real background-run data (camera images, handscanned bubble multiplicity, and precomputed `.sbc` analysis outputs) for calibrating the rendered cameras' poses against the physical detector. It expects that data locally under `~/coop/local-runs/<run>/<ev>/`,  `~/coop/local-runs/<run>/analysis/`, and `~/coop/local-runs/<run>/handscan.txt`. These can be fetched from gpv, in the unpacked format. The expectation is that the events have been handscanned for multiplicity before analysis here. For further information on the analysis modules, see [LAr10Ana](https://github.com/SBC-Collaboration/LAr10Ana).
 
 ## Setting Up the Environment
 
@@ -14,11 +12,11 @@ The code now runs from a plain Python virtual environment (`venv`) rather than A
 
 ```console
 python3 -m venv .venv
-source .venv/bin/activate  # on Windows: .venv\Scripts\activate
+source .venv/bin/activate 
 pip install -r requirements.txt
 ```
 
-That installs everything needed for both rendering (Mitsuba/Dr.Jit/OpenCV) and working with real background-run data (`sbcbinaryformat`, pulled straight from its GitHub repo since it isn't on PyPI). GPU-accelerated rendering requires an NVIDIA card; without one it falls back to CPU rendering automatically.
+If you use a different shell (like me who uses fish!!) use the appropriate activate script. Should work for power shell (ps1) and csh, there is probably a way to make it work in nu or elvish but your mileage may vary. That installs everything needed for both rendering (Mitsuba/Dr.Jit/OpenCV) and working with real background-run data (`sbcbinaryformat`, pulled straight from its GitHub repo since it isn't on PyPI). GPU-accelerated rendering requires an NVIDIA card; without one it falls back to CPU rendering automatically.
 
 ### Registering a Jupyter kernel
 
@@ -39,10 +37,6 @@ jupyter lab
 ```
 
 which opens a lab environment where you can edit and run the notebooks in your default browser. If you're using a code editor like VS Code instead, point it at the same venv's interpreter and select the **Python (sbc)** kernel when opening a notebook.
-
-### Legacy: Anaconda on Windows
-
-The original code was developed in an Anaconda environment on Windows; `environment.yml` documents that setup and can still be used with `conda env create -f environment.yml` if you'd rather use conda. It hasn't been kept in sync with `requirements.txt` and may be out of date — the venv + `requirements.txt` path above is what's actually in use now.
 
 ## Notebooks
 
