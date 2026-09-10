@@ -1,16 +1,20 @@
 # Rendering with Mitsuba
-drjit
-mitsuba
+drjit==1.5.0
+mitsuba==3.9.1
 
 # Math and plots
-numpy
-matplotlib
+numpy==2.5.2
+matplotlib==3.11.1
 
 # Image processing
-Pillow
-opencv-python
+pillow==12.3.0
+opencv-python==5.0.0.93
+
+# Real background-run data (SBC binary format: handscan/reco/bubble analysis outputs)
+# Not on PyPI -- installed straight from its repo, pinned to the commit this was tested against.
+sbcbinaryformat @ git+https://github.com/SBC-Collaboration/SBCBinaryFormat.git@7a982e9ce163583d9e467aa84f474ffb324cad6b#subdirectory=python
 
 # Jupyter lab/notebook
-jupyter
-jupyterlab
-notebook
+jupyter==1.1.1
+jupyterlab==4.6.3
+notebook==7.6.2
