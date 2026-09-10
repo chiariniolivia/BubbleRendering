@@ -13,30 +13,29 @@ The associated Blender files used to clean up and export the chamber model can b
 The code now runs from a plain Python virtual environment (`venv`) rather than Anaconda. Any Python 3.12+ interpreter should work; this was last verified against Python 3.14.
 
 ```console
-python3 -m venv ~/py-envs/sbc
-~/py-envs/sbc/bin/pip install -r requirements.txt
+python3 -m venv .venv
+source .venv/bin/activate  # on Windows: .venv\Scripts\activate
+pip install -r requirements.txt
 ```
 
-That installs everything needed for both rendering (Mitsuba/Dr.Jit/OpenCV) and working with real background-run data (`sbcbinaryformat`, pulled straight from its GitHub repo since it isn't on PyPI).
-
-Rendering picks the best available Mitsuba variant automatically (`setup.py` tries `cuda_ad_rgb`, then `llvm_ad_rgb`, then `scalar_rgb`). GPU acceleration needs an **NVIDIA** card — Mitsuba/Dr.Jit currently only ship CUDA (NVIDIA) and LLVM (CPU) backends, so an AMD GPU won't be used and rendering will run on CPU via `llvm_ad_rgb` regardless.
+That installs everything needed for both rendering (Mitsuba/Dr.Jit/OpenCV) and working with real background-run data (`sbcbinaryformat`, pulled straight from its GitHub repo since it isn't on PyPI). GPU-accelerated rendering requires an NVIDIA card; without one it falls back to CPU rendering automatically.
 
 ### Registering a Jupyter kernel
 
-So the notebooks can find this environment, register it with Jupyter once:
+So the notebooks can find this environment, register it with Jupyter once (with the venv activated):
 
 ```console
-~/py-envs/sbc/bin/python -m ipykernel install --user --name sbc --display-name "Python (sbc)"
+python -m ipykernel install --user --name sbc --display-name "Python (sbc)"
 ```
 
 Then open a notebook and select the **Python (sbc)** kernel. Every notebook in this repo (root and `archive/`) already has its kernelspec set to `sbc`.
 
 ### Running Notebooks
 
-To launch Jupyter Lab directly from this environment:
+To launch Jupyter Lab directly from this environment (with the venv activated):
 
 ```console
-~/py-envs/sbc/bin/jupyter lab
+jupyter lab
 ```
 
 which opens a lab environment where you can edit and run the notebooks in your default browser. If you're using a code editor like VS Code instead, point it at the same venv's interpreter and select the **Python (sbc)** kernel when opening a notebook.
