@@ -173,3 +173,27 @@ def load_reco_single(run_dir, ev):
             "reproj_error": float(reproj_errors[i]) if valid else None,
         })
     return rows
+
+
+# Rotation + z-offset relating this repo's rendering coordinate frame to the real chamber's
+# reco/triangulation coordinate frame (LAr10Ana's own frame), both in cm -- calibrated
+# externally, not derived from anything in this module. Given in the render -> real
+# direction; inverted below since callers have a real-space reco position and want the
+# render-space placement.
+_RENDER_TO_REAL_ROTATION_CM = np.array([
+    [-0.921063439, 0.389055795],
+    [-0.389064828, -0.921334632],
+])
+_REAL_TO_RENDER_ROTATION_CM = np.linalg.inv(_RENDER_TO_REAL_ROTATION_CM)
+_RENDER_TO_REAL_Z_OFFSET_CM = 5.13842
+
+
+def real_position_to_render_cm(coord_mm):
+    """Converts a reco'd 3D bubble position (mm, in LAr10Ana's real-detector coordinate
+    frame -- e.g. from load_reco_single()) into this repo's rendering coordinate frame (cm,
+    e.g. for mi.ScalarTransform4f.translate()). Undoes the calibrated render<->real rotation
+    and z-offset between the two frames, on top of the mm -> cm unit conversion."""
+    coord_cm = np.asarray(coord_mm, dtype=float) / 10.0
+    x_rend, y_rend = _REAL_TO_RENDER_ROTATION_CM @ coord_cm[:2]
+    z_rend = coord_cm[2] - _RENDER_TO_REAL_Z_OFFSET_CM
+    return np.array([x_rend, y_rend, z_rend])
