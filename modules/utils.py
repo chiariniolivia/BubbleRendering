@@ -92,7 +92,7 @@ def masked_mse(image: mi.TensorXf, ref: mi.TensorXb, mask) -> float | dr.ArrayBa
 ### Triangulation
 ###
 def get_xy_scale(image_width: int = 1280, image_height: int = 800, 
-                 fov: float = 100, fov_axis: str = 'x') -> np.ndarray:
+                 fov: float = 86, fov_axis: str = 'x') -> np.ndarray:
     """Determine the scale factor for normalized points along the x and y axes
     to account for the fov along the provided fov axis. (Assuming no lens distortion)
     
@@ -154,7 +154,7 @@ def normalize_coordinate(pixel_coord: np.ndarray,
                          camera_matrix: np.ndarray | None = None,
                          image_width: int = 1280, 
                          image_height: int = 800,
-                         fov: float = 100,
+                         fov: float = 86,
                          fov_axis: str = 'x') -> np.ndarray:
     """Normalize (2,) UV pixel coordinate by multiplying by the inverse of the
     camera matrix. If camera matrix is not provided (i.e., `None`), compute the 
@@ -185,7 +185,7 @@ def normalize_coordinate(pixel_coord: np.ndarray,
 def pixel_offset(normalized_offset: np.ndarray,
                  image_width: int = 1280,
                  image_height: int = 800,
-                 fov: float = 100,
+                 fov: float = 86,
                  fov_axis: str = 'x') -> np.ndarray:
     """Take in the normalized image offset and image dimensions
     and convert the normalized offset to a pixel offset.
@@ -213,7 +213,7 @@ def normalized_to_pixel(normalized_offset: np.ndarray,
                         camera_matrix: np.ndarray | None = None,
                         image_width: int = 1280,
                         image_height: int = 800,
-                        fov: float = 100,
+                        fov: float = 86,
                         fov_axis: str = 'x') -> np.ndarray:
     """Take in the normalized image offset and image dimensions
     and convert the normalized UV coordinate to a pixel coordinate
@@ -1294,7 +1294,7 @@ def estimate_pose_matrix(pixel_posns: np.ndarray,
         ])
 
     if camera_matrix is None:
-        camera_matrix = get_ideal_camera_matrix(fov=100)
+        camera_matrix = get_ideal_camera_matrix(fov=86)
     
     ret, rvec, tvec = cv2.solvePnP(world_posns, pixel_posns, camera_matrix, distortion_coeffs)
     if not ret:

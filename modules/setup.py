@@ -502,7 +502,7 @@ def load_components(materials: dict, use_distorted_jar: bool = True, fermi_chamb
     return components
 
 
-def create_sensor(sensor_number=2, sample_count=1024, fov=100, width=1280, height=800, 
+def create_sensor(sensor_number=2, sample_count=1024, fov=86, width=1280, height=800,
                 fermi_chamber=True, to_world=None, type='perspective', near_clip=0.01, 
                 far_clip=1000.0, film:dict=None, sampler:dict=None, dist_from_viewport:float=1.0) -> dict:
     """
