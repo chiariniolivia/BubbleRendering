@@ -137,6 +137,38 @@ def load_clicked_points(path):
         return np.array(json.load(f)["points"])
 
 
+POSE_SOLVE_OUTPUT_DIR = "outputs/poseSolve"
+
+
+def new_run_dir(baseDir=POSE_SOLVE_OUTPUT_DIR):
+    """A fresh outputs/poseSolve/<date ran>/ folder (YYYY_MM_DD_HH_MM_SS) for one
+    notebook run's figures and renders. Only the path -- folders are made on first save."""
+    return pathlib.Path(baseDir) / time.strftime("%Y_%m_%d_%H_%M_%S")
+
+
+def save_figure(fig, name, runDir):
+    """Saves a matplotlib figure to <runDir>/figures/<name>.png."""
+    figPath = pathlib.Path(runDir) / "figures" / f"{name}.png"
+    figPath.parent.mkdir(parents=True, exist_ok=True)
+    fig.savefig(figPath, dpi=150, bbox_inches="tight")
+    print("saved figure:", figPath)
+
+
+def save_render(image, name, runDir, isDiff=False):
+    """Saves a mono render to <runDir>/renders/<name>.png as an 8-bit PNG: gamma 2.2 for
+    a plain render, or scaled to its own max for a diff image (so a faint marker still
+    shows). 8-bit and gamma'd, so for looking at -- not for re-running detection on."""
+    renderPath = pathlib.Path(runDir) / "renders" / f"{name}.png"
+    renderPath.parent.mkdir(parents=True, exist_ok=True)
+    image = np.asarray(image, dtype=float)
+    if isDiff:
+        image = np.clip(image / max(image.max(), 1e-9), 0, 1)
+    else:
+        image = np.clip(image, 0, 1) ** (1 / 2.2)
+    plt.imsave(renderPath, image, cmap="gray", vmin=0, vmax=1)
+    print("saved render:", renderPath)
+
+
 def perturb_pose(toWorld, poseCorrection):
     """Applies a 6-vector pose correction [rx, ry, rz, tx, ty, tz] to a 4x4 camera
     to_world matrix. The rotation (Rodrigues vector, radians) and translation (cm) are
@@ -147,7 +179,7 @@ def perturb_pose(toWorld, poseCorrection):
     rotation, _ = cv2.Rodrigues(np.asarray(poseCorrection[:3], dtype=float))
     correction = np.eye(4)
     correction[:3, :3] = rotation
-    correction[:3, 3] = poseCorrection[3:]
+    correction[:3, 3] = poseCorrection[3:6]  # anything past [5] is lens distortion, not pose
     return np.asarray(toWorld) @ correction
 
 
@@ -179,12 +211,75 @@ def match_points_one_to_one(predictedPixels, observedPixels, maxDistancePx):
     return pairs
 
 
-ROTATION_ONLY = (True, True, True, False, False, False)
+def apply_radial_distortion(pixels, k1, k2=0.0, focalScale=1.0, cameraMatrix=None):
+    """Applies Brown-Conrady radial lens distortion to (n, 2) pinhole pixel positions:
+    the pixel at normalized offset xy from the image center moves to
+    xy * (1 + k1 r^2 + k2 r^4), r^2 = |xy|^2. Same model and sign convention as OpenCV's
+    distCoeffs [k1, k2, 0, 0, 0] -- k1 < 0 is barrel (edges pulled inward), the usual
+    case for a wide lens. cameraMatrix defaults to the ideal fov=86 pinhole every render
+    in this repo uses, so pixels straight from a render or from flat_project() fit as-is.
+
+    focalScale zooms the result about the image center -- exactly what a different fov
+    (focal length) does to a pinhole image, refraction included, since the refraction
+    happens in the scene, not the sensor. 1.0 = the fov=86 every render uses; >1 means
+    the real lens has a longer focal length (narrower fov) than assumed."""
+    if cameraMatrix is None:
+        cameraMatrix = get_ideal_camera_matrix(fov=86)
+    focal, cx, cy = cameraMatrix[0, 0], cameraMatrix[0, 2], cameraMatrix[1, 2]
+    xy = (np.asarray(pixels, dtype=float) - [cx, cy]) / focal
+    r2 = (xy ** 2).sum(axis=1, keepdims=True)
+    return np.array([cx, cy]) + focalScale * focal * xy * (1 + k1 * r2 + k2 * r2 ** 2)
+
+
+def distort_render(image, k1, k2=0.0, focalScale=1.0, cameraMatrix=None):
+    """Warps a (pinhole, undistorted) render so it matches what a real lens with radial
+    distortion k1/k2 would see -- Mitsuba 3 has no distorting camera, so this is how a
+    render gets compared against a raw real photo. Uses cv2.remap: for every output
+    (distorted) pixel, cv2.undistortPoints finds which render pixel lands there.
+    With barrel distortion (k1 < 0) the corners of the output come from outside the
+    render's own frame and stay black; fine here, since the real photos' corners are
+    black outside the viewport anyway. Pixel for pixel this matches
+    apply_radial_distortion() with the same k1/k2/focalScale, as long as the model
+    stays monotonic out to the image edge (see distortion_is_monotonic())."""
+    if cameraMatrix is None:
+        cameraMatrix = get_ideal_camera_matrix(fov=86)
+    height, width = image.shape[:2]
+    gridX, gridY = np.meshgrid(np.arange(width, dtype=np.float32), np.arange(height, dtype=np.float32))
+    distortedPixels = np.stack([gridX.ravel(), gridY.ravel()], axis=1)[:, None, :]
+    distCoeffs = np.array([k1, k2, 0.0, 0.0, 0.0])
+    outputMatrix = cameraMatrix.copy()
+    outputMatrix[0, 0] *= focalScale
+    outputMatrix[1, 1] *= focalScale
+    sourcePixels = cv2.undistortPoints(distortedPixels, outputMatrix, distCoeffs, P=cameraMatrix)
+    mapX = sourcePixels[:, 0, 0].reshape(height, width).astype(np.float32)
+    mapY = sourcePixels[:, 0, 1].reshape(height, width).astype(np.float32)
+    return cv2.remap(np.asarray(image, dtype=np.float32), mapX, mapY, interpolation=cv2.INTER_LINEAR,
+                     borderMode=cv2.BORDER_CONSTANT, borderValue=0)
+
+
+def distortion_is_monotonic(k1, k2=0.0, imageWidth=1280, imageHeight=800, fov=86):
+    # fov: the lens's actual (e.g. solved) fov, which sets how far out the corner is.
+    """True if the radial model keeps pushing points outward all the way to the image
+    corner, i.e. d/dr [r (1 + k1 r^2 + k2 r^4)] > 0 there. A strong enough barrel k1
+    makes it fold back on itself (two different scene points land on one pixel), which
+    no real lens does -- a fitted k1 that fails this is soaking up some other error."""
+    cameraMatrix = get_ideal_camera_matrix(fov, image_width=imageWidth, image_height=imageHeight)
+    rMax = np.hypot(imageWidth / 2, imageHeight / 2) / cameraMatrix[0, 0]
+    r = np.linspace(0, rMax, 200)
+    return bool(np.all(1 + 3 * k1 * r ** 2 + 5 * k2 * r ** 4 > 0))
+
+
+# freeParams presets for fit_pose_correction(): which of
+# [rx, ry, rz, tx, ty, tz, k1, k2, focalScale] get solved for.
+ROTATION_ONLY = (True, True, True, False, False, False, False, False, False)
+ROTATION_AND_K1 = (True, True, True, False, False, False, True, False, False)
+ROTATION_AND_FOCAL = (True, True, True, False, False, False, False, False, True)
+ROTATION_FOCAL_AND_K1 = (True, True, True, False, False, False, True, False, True)
 
 
 def fit_pose_correction(worldPositionsCm, renderPixels, observedPixels, toWorld,
                         cutoffSchedulePx=(130, 90, 60, 40), freeParams=ROTATION_ONLY,
-                        gaussNewtonIters=15):
+                        gaussNewtonIters=15, initialCorrection=None):
     """Solves for the pose correction (see perturb_pose()) that moves each known 3D point
     from where a render at toWorld put it (renderPixels) onto where it was actually seen
     in a real photo (observedPixels, unlabeled -- e.g. load_clicked_points()).
@@ -202,7 +297,14 @@ def fit_pose_correction(worldPositionsCm, renderPixels, observedPixels, toWorld,
     ICP-style: match one-to-one within a cutoff, fit, then shrink the cutoff, per
     cutoffSchedulePx.
 
-    freeParams picks which of [rx, ry, rz, tx, ty, tz] are solved for. Defaults to
+    Lens distortion: the real camera's lens distorts, renders don't, so the prediction
+    is finally passed through apply_radial_distortion(k1, k2, focalScale) -- params
+    [6], [7] and [8] (stored as focalScale - 1, so all-zero = the assumed camera).
+
+    freeParams picks which of [rx, ry, rz, tx, ty, tz, k1, k2, focalScale] are solved
+    for (a 6-long tuple means pose only). Parameters not freed stay at their
+    initialCorrection value (default all zeros = the assumed camera) -- e.g. pass a
+    previous fit's "correction" to hold its solved focalScale fixed while fitting k1. Defaults to
     rotation only: on cam2, also freeing translation fit the clicks better on paper
     (6px vs. 16px median), but with a 2-3cm camera shift, which a validation render
     showed was wrong -- it moved the camera into the viewport geometry and only 14 of
@@ -210,18 +312,21 @@ def fit_pose_correction(worldPositionsCm, renderPixels, observedPixels, toWorld,
     unmodeled lens distortion or fov error into a fake translation.
 
     worldPositionsCm, renderPixels: (n, 3) / (n, 2), same order. Returns a dict with
-    "correction" (6,), "toWorld" (4x4 corrected), "pairs" [(pointIndex, observedIndex)]
+    "correction" (9,), "toWorld" (4x4 corrected), "distortion" {"k1", "k2",
+    "focalScale"} (pass straight to distort_render(**...)), "pairs" [(pointIndex, observedIndex)]
     at the final cutoff, "residualsPx" (per pair), and "deltaPx" (the (n, 2) refraction
     offsets)."""
     worldPositionsCm = np.asarray(worldPositionsCm, dtype=float)
     observedPixels = np.asarray(observedPixels, dtype=float)
-    freeMask = np.array(freeParams, dtype=bool)
+    freeMask = np.zeros(9, dtype=bool)
+    freeMask[:len(freeParams)] = freeParams
     deltaPx = np.asarray(renderPixels, dtype=float) - flat_project(toWorld, worldPositionsCm)
 
     def predict(correction):
-        return flat_project(perturb_pose(toWorld, correction), worldPositionsCm) + deltaPx
+        renderPx = flat_project(perturb_pose(toWorld, correction), worldPositionsCm) + deltaPx
+        return apply_radial_distortion(renderPx, correction[6], correction[7], 1 + correction[8])
 
-    correction = np.zeros(6)
+    correction = np.zeros(9) if initialCorrection is None else np.array(initialCorrection, dtype=float)
     for cutoffPx in cutoffSchedulePx:
         pairs = match_points_one_to_one(predict(correction), observedPixels, cutoffPx)
         if len(pairs) < 3:
@@ -242,23 +347,29 @@ def fit_pose_correction(worldPositionsCm, renderPixels, observedPixels, toWorld,
     return {
         "correction": correction,
         "toWorld": perturb_pose(toWorld, correction),
+        "distortion": {"k1": float(correction[6]), "k2": float(correction[7]),
+                       "focalScale": float(1 + correction[8])},
         "pairs": pairs,
         "residualsPx": residualsPx,
         "deltaPx": deltaPx,
     }
 
 
-def render_light_marker_pair(camera, positionsCm, toWorld=None, sampleCount=128, radiance=80.0):
+def render_light_marker_pair(camera, positionsCm, toWorld=None, sampleCount=128, radiance=80.0,
+                             fov=86):
     """Renders camera N's scene twice -- with a light marker at each of positionsCm, and
     without -- from toWorld (4x4, defaults to create_sensor()'s assumed pose). Returns
-    (litImage, baselineImage) mono arrays, ready for detect_light_markers(lit, baseline=...)."""
+    (litImage, baselineImage) mono arrays, ready for detect_light_markers(lit, baseline=...).
+    fov (degrees, x axis) defaults to the 86 every render uses; pass a solved fov (e.g.
+    from fit_pose_correction(..., freeParams=ROTATION_AND_FOCAL)) to render the real lens's
+    view natively instead of warping a fov=86 render."""
     images = []
     for withMarkers in (True, False):
         components = load_components(materials=create_materials(with_fluids=True), use_distorted_jar=True)
         if withMarkers:
             add_point_light_markers(components, positionsCm, radiance=radiance)
         sensorArgs = {} if toWorld is None else {"to_world": mi.ScalarTransform4f(np.asarray(toWorld))}
-        sensor = create_sensor(sensor_number=camera, sample_count=sampleCount, **sensorArgs)
+        sensor = create_sensor(sensor_number=camera, sample_count=sampleCount, fov=fov, **sensorArgs)
         images.append(to_mono(np.array(render(scene=load_scene(components=components, sensor=sensor), denoise=False))))
     return tuple(images)
 
