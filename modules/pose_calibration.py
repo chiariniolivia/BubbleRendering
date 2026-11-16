@@ -137,6 +137,16 @@ def load_clicked_points(path):
         return np.array(json.load(f)["points"])
 
 
+def load_clicked_corners(path):
+    """Loads the raw clicks from a `click_label_points.py --corners` output file: a list
+    with one (k, 2) array per cover -- k = 4 corners (sorted in order around the cover),
+    or k = 1 or 2 for a cover that was finished early (its center, or two opposite
+    corners). load_clicked_points() on the same file gives each cover's center, in the
+    same order. Raises KeyError for a file saved without --corners."""
+    with open(path) as f:
+        return [np.array(group) for group in json.load(f)["corners"]]
+
+
 POSE_SOLVE_OUTPUT_DIR = "outputs/poseSolve"
 
 
