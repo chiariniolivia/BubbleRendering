@@ -208,6 +208,13 @@ def match_points_one_to_one(predictedPixels, observedPixels, maxDistancePx):
     CameraPoseCalibrationFromSiPMs.ipynb -- e.g. three clicks -> one SiPM).
     Returns a list of (predictedIndex, observedIndex) pairs."""
     distances = np.linalg.norm(predictedPixels[:, None] - observedPixels[None], axis=-1)
+    return match_from_distances(distances, maxDistancePx)
+
+
+def match_from_distances(distances, maxDistancePx):
+    """The greedy one-to-one step of match_points_one_to_one(), on an already-computed
+    (predicted, observed) distance matrix -- so the distance can be anything, e.g. the
+    best-corner-alignment cost of match_covers()."""
     pairs, usedPredicted, usedObserved = [], set(), set()
     for flatIndex in np.argsort(distances, axis=None):
         predIdx, obsIdx = np.unravel_index(flatIndex, distances.shape)
@@ -361,6 +368,358 @@ def fit_pose_correction(worldPositionsCm, renderPixels, observedPixels, toWorld,
                        "focalScale": float(1 + correction[8])},
         "pairs": pairs,
         "residualsPx": residualsPx,
+        "deltaPx": deltaPx,
+    }
+
+
+COVER_CORNER_PERMUTATIONS = [
+    list(np.roll(order, shift))
+    for order in ([0, 1, 2, 3], [0, 3, 2, 1]) for shift in range(4)
+]  # 4 rotations x 2 directions: a square cover has no preferred first corner
+
+
+def load_cover_corners(covers_ply="chamber_model/components/sipm_covers.ply"):
+    """3D corners (render-space cm) of every SiPM cover plate the CAD models, from
+    sipm_covers.ply: {id: (4, 3) array, in order around the plate}, id taken from the
+    nearest load_sipm_fiducial_positions() SiPM. The plates are 1.4 x 1.4 cm squares
+    (corners slightly chamfered), 40 of them -- the first SiPM of each of the 8 rings
+    has no cover mesh, same gap as sipm_detectors.ply (see load_assumed_positions()),
+    so those 8 ids are simply absent from the result.
+
+    Each plate's 4 corners are the minimum-area rectangle around its vertices in the
+    plate's own plane (so the chamfers don't make 8 corners)."""
+    mesh = mi.load_dict({"type": "ply", "filename": covers_ply})
+    params = mi.traverse(mesh)
+    vertices = np.array(params["vertex_positions"]).reshape(-1, 3)
+    faces = np.array(params["faces"]).reshape(-1, 3)
+    parent = np.arange(len(vertices))
+
+    def find(x):
+        while parent[x] != x:
+            parent[x] = parent[parent[x]]
+            x = parent[x]
+        return x
+
+    for a, b, c in faces:
+        for u, v in ((a, b), (b, c)):
+            ru, rv = find(u), find(v)
+            if ru != rv:
+                parent[ru] = rv
+    roots = np.array([find(i) for i in range(len(vertices))])
+
+    positions = load_sipm_fiducial_positions()["sipm"]
+    ids = list(positions)
+    centers = np.array([positions[i] for i in ids])
+    corners = {}
+    for root in np.unique(roots):
+        pts = vertices[roots == root]
+        center = pts.mean(axis=0)
+        _, _, vt = np.linalg.svd(pts - center)
+        normal = vt[2]
+        up = np.array([0.0, 0.0, 1.0]) - normal[2] * normal
+        if np.linalg.norm(up) < 1e-6:
+            up = np.array([1.0, 0.0, 0.0]) - normal[0] * normal
+        up /= np.linalg.norm(up)
+        side = np.cross(normal, up)
+        planar = np.stack([(pts - center) @ up, (pts - center) @ side], axis=1)
+        box = cv2.boxPoints(cv2.minAreaRect(planar.astype(np.float32)))
+        sid = ids[int(np.linalg.norm(centers - center, axis=1).argmin())]
+        corners[sid] = center + box[:, :1] * up + box[:, 1:] * side
+    return corners
+
+
+def match_covers(predictedCenters, predictedCorners, observedCovers, maxDistancePx):
+    """One-to-one matching of clicked covers to SiPMs by *corner alignment*.
+    predictedCenters (n, 2); predictedCorners (n, 4, 2), NaN for a SiPM with no modeled
+    cover; observedCovers a list of (k, 2) arrays (k = 4 clicked corners, or the 1-2
+    clicks of a cover finished early).
+
+    Cost of a (SiPM, cover) pair, in px: for 4 corners vs. 4 corners, the mean corner
+    distance under the best of the 8 ways to line the corners up (a square cover has no
+    preferred first corner); otherwise just the distance between the two centers.
+    Returns (pairs [(sipmIndex, coverIndex)], cornerOrders {pair: 4-long index list or
+    None}) -- cornerOrders[(i, j)][c] is the predicted corner that observed corner c
+    was matched to."""
+    n, m = len(predictedCenters), len(observedCovers)
+    cost = np.full((n, m), np.inf)
+    bestOrder = {}
+    for j, obs in enumerate(observedCovers):
+        obs = np.asarray(obs, dtype=float)
+        for i in range(n):
+            if len(obs) == 4 and not np.isnan(predictedCorners[i]).any():
+                costs = [np.linalg.norm(predictedCorners[i][order] - obs, axis=1).mean()
+                         for order in COVER_CORNER_PERMUTATIONS]
+                k = int(np.argmin(costs))
+                cost[i, j] = costs[k]
+                bestOrder[(i, j)] = COVER_CORNER_PERMUTATIONS[k]
+            else:
+                cost[i, j] = np.linalg.norm(predictedCenters[i] - obs.mean(axis=0))
+    pairs = match_from_distances(cost, maxDistancePx)
+    return pairs, {pair: bestOrder.get(pair) for pair in pairs}
+
+
+def filter_corner_offsets(offsets, outlierPx=6.0, minCorners=3):
+    """Cleans up the corner refraction offsets measured by render_corner_marker_positions().
+    offsets (n, 4, 2): each corner's measured offset minus its SiPM center's, NaN where no
+    blob was found. Across one small plate those offsets should agree to a few px (on cam2 the
+    good SiPMs' corners sit within ~3 px of each other), so a corner is dropped when it's more
+    than outlierPx from the median of its own SiPM's corners (a blob matched to the wrong
+    marker, or a reflection), and a SiPM left with fewer than minCorners trusted corners is
+    dropped entirely. Dropped / missing corners then take the median offset of their SiPM's
+    remaining corners -- not the SiPM center's own offset, which would twist the plate when its
+    neighbours carry a measured one -- and a SiPM with no trusted corner gets 0 (center's offset).
+    outlierPx=None skips the outlier test (missing corners are still filled in). Returns
+    (filled (n, 4, 2) with no NaN, trusted (n, 4) bool -- which corners are real measurements
+    that passed)."""
+    offsets = np.array(offsets, dtype=float)
+    out = np.zeros_like(offsets)
+    trusted = np.zeros(offsets.shape[:2], dtype=bool)
+    for i, row in enumerate(offsets):
+        valid = ~np.isnan(row[:, 0])
+        if outlierPx is not None and valid.sum() >= minCorners:
+            median = np.median(row[valid], axis=0)
+            valid &= np.linalg.norm(row - median, axis=1) <= outlierPx
+        if valid.sum() < (minCorners if outlierPx is not None else 1):
+            continue
+        out[i] = np.where(valid[:, None], row, np.median(row[valid], axis=0))
+        trusted[i] = valid
+    return out, trusted
+
+
+def render_corner_marker_positions(camera, sipmIds, centersCm, cornersCm, centerRenderPixels,
+                                  coverScale=1.0, radiusCm=0.1, radiance=2000.0, sampleCount=64,
+                                  baselineSamples=128, searchRadiusPx=25, minDiff=100.0, progress=print):
+    """Where a real render puts small light markers at each SiPM cover's 4 corners.
+
+    For every SiPM: puts a tiny emissive sphere (radiusCm -- smaller than the 0.3 cm markers used
+    for the SiPM centers, so each corner is a tighter blob) on each of its cover plate's 4 corners
+    (cornersCm[i], (4, 3); optionally scaled about the plate center by coverScale), renders
+    camera N at its assumed pose, and diffs against one no-marker baseline. Rendering the corners
+    (instead of reusing the center's refraction offset for them) measures the refraction across
+    the cover directly. Markers placed 1.5x out from the plate (where the clicked corners are) were
+    mostly hidden by the mount around the plate, so the default is the plate's own corners, where
+    radiance 2000 gives blob peaks of ~500-1100 against noise under 100 (minDiff=100 keeps only
+    those); fit_pose_correction_covers() extends the measured offset out to the clicked size.
+
+    Blobs in the diff are matched to the 4 corners within searchRadiusPx of where the flat
+    projection plus the center's own refraction offset (centerRenderPixels[i], the SiPM's cached
+    render position) says each should be; each position is an intensity-weighted centroid
+    (sub-pixel). Corners with no blob are NaN, e.g. when two corners of an edge-on cover merge
+    into one blob (blobs larger than 2.5x the median area are dropped as merged).
+
+    Returns {sipmId: {"corners": (4, 2) array, NaN where not found, "blobAreaPx": (4,)}}.
+    centersCm/cornersCm/centerRenderPixels are indexed like sipmIds."""
+    assumedToWorld = np.array(create_sensor(sensor_number=camera)["to_world"].matrix)
+    baselineComponents = load_components(materials=create_materials(with_fluids=True), use_distorted_jar=True)
+    baseline = to_mono(np.array(render(scene=load_scene(
+        components=baselineComponents, sensor=create_sensor(sensor_number=camera, sample_count=baselineSamples)),
+        denoise=False)))
+
+    results = {}
+    for n, sid in enumerate(sipmIds):
+        center = np.asarray(centersCm[n], dtype=float)
+        scaled = center + coverScale * (np.asarray(cornersCm[n], dtype=float) - center)
+        if np.isnan(scaled).any():
+            continue
+        components = load_components(materials=create_materials(with_fluids=True), use_distorted_jar=True)
+        add_point_light_markers(components, {f"{sid}_corner{k}": scaled[k] for k in range(4)},
+                                radiusCm=radiusCm, radiance=radiance)
+        image = to_mono(np.array(render(scene=load_scene(
+            components=components, sensor=create_sensor(sensor_number=camera, sample_count=sampleCount)),
+            denoise=False)))
+        diff = image - baseline
+
+        centerDelta = np.asarray(centerRenderPixels[n], dtype=float) - flat_project(assumedToWorld, center[None])[0]
+        predicted = flat_project(assumedToWorld, scaled) + centerDelta
+        count, labels, stats, _ = cv2.connectedComponentsWithStats((diff >= minDiff).astype(np.uint8), connectivity=8)
+        blobs, areas = [], []
+        for label in range(1, count):
+            if stats[label, cv2.CC_STAT_AREA] < 2:
+                continue
+            ys, xs = np.nonzero(labels == label)
+            weight = diff[ys, xs]
+            blobs.append([(xs * weight).sum() / weight.sum(), (ys * weight).sum() / weight.sum()])
+            areas.append(int(stats[label, cv2.CC_STAT_AREA]))
+        found = np.full((4, 2), np.nan)
+        blobAreas = np.zeros(4)
+        if blobs:
+            blobs = np.array(blobs)
+            for cornerIdx, blobIdx in match_points_one_to_one(predicted, blobs, searchRadiusPx):
+                found[cornerIdx] = blobs[blobIdx]
+                blobAreas[cornerIdx] = areas[blobIdx]
+        results[sid] = {"corners": found, "blobAreaPx": blobAreas}
+        progress(f"[{n + 1}/{len(sipmIds)}] sipm {sid}: {int((~np.isnan(found[:, 0])).sum())}/4 corner blobs")
+
+    allAreas = np.concatenate([r["blobAreaPx"][r["blobAreaPx"] > 0] for r in results.values()])
+    if len(allAreas):
+        tooBig = 2.5 * np.median(allAreas)
+        for r in results.values():
+            merged = r["blobAreaPx"] > tooBig
+            r["corners"][merged] = np.nan
+    return results
+
+
+def fit_pose_correction_covers(centersCm, cornersCm, renderPixels, observedCovers, toWorld,
+                               cutoffSchedulePx=(130, 90, 60, 40), freeParams=ROTATION_ONLY,
+                               gaussNewtonIters=15, initialCorrection=None,
+                               fitCoverScale=True, initialCoverScale=1.0,
+                               cornerRenderPixels=None, cornerRenderScale=1.5, robustPx=None,
+                               cornerOutlierPx=6.0, fullWeightSipms=None):
+    """fit_pose_correction(), but matching and fitting on each cover's *corners* instead
+    of one midpoint per cover.
+
+    centersCm (n, 3) / renderPixels (n, 2): each SiPM's CAD center and where a render
+    puts it (as fit_pose_correction()). cornersCm (n, 4, 3): the cover plate's 4 corners
+    (load_cover_corners(), arranged per SiPM, NaN rows for the 8 SiPMs with no cover
+    mesh). observedCovers: a list of (k, 2) arrays, one per clicked cover (the "corners"
+    of a click_label_points.py --corners file).
+
+    Cover size: the corners clicked on cam2 enclose ~1.5x the CAD plate's 1.4 cm (shape
+    and orientation agree to ~3 px once that is scaled out), i.e. what's being clicked is
+    a larger feature than the plate. Left alone, that size gap would be fit as pose
+    error, so with fitCoverScale each plate's corners are scaled about its center in
+    the plate's own plane by one shared factor "coverScale", solved with the pose
+    (clicked size = coverScale x 1.4 cm). initialCoverScale is the starting guess, or
+    the fixed value when fitCoverScale is False.
+
+    Refraction: as in fit_pose_correction(), measured at each SiPM's center from its
+    render and assumed unchanged for a small pose change -- here also assumed the same
+    across the cover (the offset changes slowly across the image; this is the one
+    approximation the corners add).
+
+    cornerRenderPixels (n, 4, 2), optional: where render_corner_marker_positions() put small
+    markers at the cover corners (scaled by cornerRenderScale about the plate center), NaN where
+    a corner wasn't found. With it, each corner's own refraction offset is measured instead of
+    borrowing the SiPM center's: the offset at plate scale s is taken as the center's plus
+    s / cornerRenderScale times the extra offset the corner render measured (linear across the
+    cover). Outlier corners are rejected and missing ones filled from their SiPM's other
+    corners by filter_corner_offsets() (cornerOutlierPx; None = no outlier test).
+
+    robustPx: if set, iteratively reweighted Huber fit -- a matched cover whose RMS point error
+    (px) exceeds robustPx has its residuals weighted by robustPx / error, so a few bad matches
+    (edge-on covers, wrong neighbor) can't drag the pose; None = plain least squares.
+    fullWeightSipms: SiPM indices (rows of centersCm) that keep weight 1 whatever their error --
+    for covers you've checked by eye and trust despite a large residual. "weights" (per pair) is
+    returned either way.
+
+    Correspondence is redone at every cutoff from the corner-alignment cost of
+    match_covers(). Each matched 4-corner cover then adds 8 residuals (its 4 corners,
+    lined up the way that matches best), each center-only match adds 2, so a well-seen
+    cover also constrains the in-plane twist the midpoint alone can't.
+
+    Returns the same keys as fit_pose_correction(): "correction", "toWorld",
+    "distortion", "pairs" [(sipmIndex, coverIndex)], "deltaPx"; plus "coverScale", "weights",
+    "cornerRendersUsed" (measured corners that passed filter_corner_offsets()),
+    "predictedCenterPx" (n, 2) / "predictedCornerPx" (n, 4, 2) at the solved pose (NaN corners for
+    SiPMs with no plate),
+    "residualsPx" (per pair: mean corner distance, or center distance for a center-only
+    match) and "cornerOrders" (see match_covers())."""
+    centersCm = np.asarray(centersCm, dtype=float)
+    cornersCm = np.asarray(cornersCm, dtype=float)
+    observedCovers = [np.asarray(o, dtype=float) for o in observedCovers]
+    freeMask = np.zeros(9, dtype=bool)
+    freeMask[:len(freeParams)] = freeParams
+    deltaPx = np.asarray(renderPixels, dtype=float) - flat_project(toWorld, centersCm)
+    hasCorners = ~np.isnan(cornersCm).any(axis=(1, 2))
+    # extra refraction offset (beyond the center's) measured at the corners, per unit of plate scale
+    cornerDeltaSlope = np.zeros((len(centersCm), 4, 2))
+    keptCorners = 0
+    if cornerRenderPixels is not None:
+        cornerRenderPixels = np.asarray(cornerRenderPixels, dtype=float)
+        atRender = centersCm[hasCorners][:, None, :] + cornerRenderScale * (
+            cornersCm[hasCorners] - centersCm[hasCorners][:, None, :])
+        flatAtRender = flat_project(toWorld, atRender.reshape(-1, 3)).reshape(-1, 4, 2)
+        measured = cornerRenderPixels[hasCorners] - flatAtRender - deltaPx[hasCorners][:, None, :]
+        measured, trusted = filter_corner_offsets(measured, cornerOutlierPx)
+        keptCorners = int(trusted.sum())
+        cornerDeltaSlope[hasCorners] = measured / cornerRenderScale
+
+    def predict(correction, coverScale):
+        pose = perturb_pose(toWorld, correction)
+        centerPx = flat_project(pose, centersCm) + deltaPx
+        cornerPx = np.full((len(centersCm), 4, 2), np.nan)
+        if hasCorners.any():
+            scaled = centersCm[hasCorners][:, None, :] + coverScale * (
+                cornersCm[hasCorners] - centersCm[hasCorners][:, None, :])
+            flat = flat_project(pose, scaled.reshape(-1, 3)).reshape(-1, 4, 2)
+            cornerPx[hasCorners] = (flat + deltaPx[hasCorners][:, None, :]
+                                    + coverScale * cornerDeltaSlope[hasCorners])
+        distort = lambda px: apply_radial_distortion(px, correction[6], correction[7], 1 + correction[8])
+        centerPx = distort(centerPx)
+        cornerPx[hasCorners] = distort(cornerPx[hasCorners].reshape(-1, 2)).reshape(-1, 4, 2)
+        return centerPx, cornerPx
+
+    def residuals(correction, coverScale, pairs, orders):
+        centerPx, cornerPx = predict(correction, coverScale)
+        out = []
+        for (i, j) in pairs:
+            order = orders[(i, j)]
+            if order is not None:
+                out.append((cornerPx[i][order] - observedCovers[j]).ravel())
+            else:
+                out.append(centerPx[i] - observedCovers[j].mean(axis=0))
+        return np.concatenate(out)
+
+    correction = np.zeros(9) if initialCorrection is None else np.array(initialCorrection, dtype=float)
+    coverScale = float(initialCoverScale)
+    nPose = int(freeMask.sum())
+    pinned = set() if fullWeightSipms is None else {int(i) for i in fullWeightSipms}
+
+    def unpack(theta):
+        c = correction.copy()
+        c[freeMask] = theta[:nPose]
+        return c, (float(theta[nPose]) if fitCoverScale else coverScale)
+
+    for cutoffPx in cutoffSchedulePx:
+        centerPx, cornerPx = predict(correction, coverScale)
+        pairs, orders = match_covers(centerPx, cornerPx, observedCovers, cutoffPx)
+        if len(pairs) < 3:
+            raise RuntimeError(f"only {len(pairs)} matches within {cutoffPx}px, can't fit a pose")
+        theta = np.concatenate([correction[freeMask], [coverScale] if fitCoverScale else []])
+        rowsPerPair = np.array([8 if orders[pair] is not None else 2 for pair in pairs])
+        rowPair = np.repeat(np.arange(len(pairs)), rowsPerPair)
+        for _ in range(gaussNewtonIters):
+            residual = residuals(*unpack(theta), pairs, orders)
+            weights = np.ones(len(pairs))
+            if robustPx is not None:
+                pairError = np.sqrt(np.bincount(rowPair, residual ** 2) / (rowsPerPair / 2))
+                weights = np.minimum(1.0, robustPx / np.maximum(pairError, 1e-9))
+                weights[[i in pinned for i, _ in pairs]] = 1.0
+            rootW = np.sqrt(weights[rowPair])
+            jacobian = np.zeros((len(residual), len(theta)))
+            for col in range(len(theta)):
+                stepped = theta.copy()
+                stepped[col] += 1e-5
+                jacobian[:, col] = (residuals(*unpack(stepped), pairs, orders) - residual) / 1e-5
+            theta = theta + np.linalg.lstsq(jacobian * rootW[:, None], -residual * rootW, rcond=None)[0]
+        correction, coverScale = unpack(theta)
+
+    centerPx, cornerPx = predict(correction, coverScale)
+    pairs, orders = match_covers(centerPx, cornerPx, observedCovers, cutoffSchedulePx[-1])
+    residualsPx = []
+    rmsPx = []
+    for (i, j) in pairs:
+        if orders[(i, j)] is not None:
+            diffs = np.linalg.norm(cornerPx[i][orders[(i, j)]] - observedCovers[j], axis=1)
+        else:
+            diffs = np.array([np.linalg.norm(centerPx[i] - observedCovers[j].mean(axis=0))])
+        residualsPx.append(diffs.mean())
+        rmsPx.append(np.sqrt((diffs ** 2).mean()))
+    finalWeights = np.ones(len(pairs)) if robustPx is None else np.minimum(1.0, robustPx / np.maximum(rmsPx, 1e-9))
+    finalWeights[[i in pinned for i, _ in pairs]] = 1.0
+    return {
+        "correction": correction,
+        "toWorld": perturb_pose(toWorld, correction),
+        "distortion": {"k1": float(correction[6]), "k2": float(correction[7]),
+                       "focalScale": float(1 + correction[8])},
+        "weights": finalWeights,
+        "cornerRendersUsed": keptCorners,
+        "predictedCenterPx": centerPx,
+        "predictedCornerPx": cornerPx,
+        "coverScale": coverScale,
+        "pairs": pairs,
+        "cornerOrders": orders,
+        "residualsPx": np.array(residualsPx),
         "deltaPx": deltaPx,
     }
 
